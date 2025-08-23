@@ -35,6 +35,23 @@ var (
 		Name: "kine_insert_errors_total",
 		Help: "Total number of insert retries due to unique constraint violations",
 	}, []string{"retriable"})
+
+	// PostgreSQL notification metrics
+	NotificationTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kine_notifications_total",
+		Help: "Total number of PostgreSQL notifications received",
+	}, []string{"result"})
+
+	NotificationLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kine_notification_latency_seconds",
+		Help:    "Latency between database change and notification receipt",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0},
+	}, []string{"driver"})
+
+	NotificationQueueSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kine_notification_queue_size",
+		Help: "Current size of notification queue",
+	}, []string{"driver"})
 )
 
 var (
@@ -61,4 +78,15 @@ func ObserveSQL(start time.Time, errCode string, sql util.Stripped, args any) {
 			instrumentedLogger.Warnf("Slow SQL (started: %v) (total time: %v): %s", start, duration, sql)
 		}
 	}
+}
+
+// ObserveNotification records metrics for database notifications
+func ObserveNotification(driver string, result string, latency time.Duration) {
+	NotificationTotal.WithLabelValues(result).Inc()
+	NotificationLatency.WithLabelValues(driver).Observe(latency.Seconds())
+}
+
+// SetNotificationQueueSize updates the current notification queue size
+func SetNotificationQueueSize(driver string, size float64) {
+	NotificationQueueSize.WithLabelValues(driver).Set(size)
 }

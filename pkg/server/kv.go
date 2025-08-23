@@ -13,6 +13,10 @@ import (
 var _ etcdserverpb.KVServer = (*KVServerBridge)(nil)
 
 func (k *KVServerBridge) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
+<<<<<<< HEAD
+=======
+
+>>>>>>> 9150e6c (Add PostgreSQL event-driven notifications for improved watch performance)
 	if r.MaxCreateRevision != 0 {
 		return nil, unsupported("maxCreateRevision")
 	}
@@ -37,10 +41,6 @@ func (k *KVServerBridge) Range(ctx context.Context, r *etcdserverpb.RangeRequest
 		return nil, unsupported("minCreateRevision")
 	}
 
-	if r.MaxCreateRevision != 0 {
-		return nil, unsupported("maxCreateRevision")
-	}
-
 	if r.MaxModRevision != 0 {
 		return nil, unsupported("maxModRevision")
 	}
@@ -53,11 +53,18 @@ func (k *KVServerBridge) Range(ctx context.Context, r *etcdserverpb.RangeRequest
 		return nil, err
 	}
 
+	var kvs []*mvccpb.KeyValue
+	if r.KeysOnly {
+		kvs = toKVsKeysOnly(resp.Kvs...)
+	} else {
+		kvs = toKVs(resp.Kvs...)
+	}
+
 	rangeResponse := &etcdserverpb.RangeResponse{
 		More:   resp.More,
 		Count:  resp.Count,
 		Header: resp.Header,
-		Kvs:    toKVs(resp.Kvs...),
+		Kvs:    kvs,
 	}
 
 	return rangeResponse, nil
@@ -99,6 +106,34 @@ func toKV(kv *KeyValue) *mvccpb.KeyValue {
 	return ret
 }
 
+func toKVsKeysOnly(kvs ...*KeyValue) []*mvccpb.KeyValue {
+	if len(kvs) == 0 || kvs[0] == nil {
+		return nil
+	}
+
+	ret := make([]*mvccpb.KeyValue, 0, len(kvs))
+	for _, kv := range kvs {
+		newKV := toKVKeysOnly(kv)
+		if newKV != nil {
+			ret = append(ret, newKV)
+		}
+	}
+	return ret
+}
+
+func toKVKeysOnly(kv *KeyValue) *mvccpb.KeyValue {
+	if kv == nil {
+		return nil
+	}
+	return &mvccpb.KeyValue{
+		Key:            []byte(kv.Key),
+		Value:          nil, // Exclude value for keysOnly
+		Lease:          kv.Lease,
+		CreateRevision: kv.CreateRevision,
+		ModRevision:    kv.ModRevision,
+	}
+}
+
 func (k *KVServerBridge) Put(ctx context.Context, r *etcdserverpb.PutRequest) (*etcdserverpb.PutResponse, error) {
 	res, err := k.limited.Put(ctx, r)
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -108,7 +143,7 @@ func (k *KVServerBridge) Put(ctx context.Context, r *etcdserverpb.PutRequest) (*
 }
 
 func (k *KVServerBridge) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteRangeRequest) (*etcdserverpb.DeleteRangeResponse, error) {
-	return nil, unsupported("delete")
+	return k.limited.DeleteRange(ctx, r)
 }
 
 func (k *KVServerBridge) Txn(ctx context.Context, r *etcdserverpb.TxnRequest) (*etcdserverpb.TxnResponse, error) {

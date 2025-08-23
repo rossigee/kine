@@ -12,7 +12,6 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/k3s-io/kine/pkg/drivers"
 	"github.com/k3s-io/kine/pkg/drivers/generic"
-	"github.com/k3s-io/kine/pkg/metrics"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/k3s-io/kine/pkg/tls"
 	"github.com/k3s-io/kine/pkg/util"
@@ -35,23 +34,24 @@ const (
 )
 
 type Config struct {
-	GRPCServer            *grpc.Server
-	WaitGroup             *sync.WaitGroup
-	Listener              string
-	Endpoint              string
-	ConnectionPoolConfig  generic.ConnectionPoolConfig
-	ServerTLSConfig       tls.Config
-	BackendTLSConfig      tls.Config
-	MetricsRegisterer     prometheus.Registerer
-	NotifyInterval        time.Duration
-	EmulatedETCDVersion   string
-	CompactInterval       time.Duration
-	CompactIntervalJitter int
-	CompactTimeout        time.Duration
-	CompactMinRetain      int64
-	CompactBatchSize      int64
-	PollBatchSize         int64
-	LogFormat             string
+	GRPCServer             *grpc.Server
+	Listener               string
+	Endpoint               string
+	ConnectionPoolConfig   generic.ConnectionPoolConfig
+	ServerTLSConfig        tls.Config
+	BackendTLSConfig       tls.Config
+	MetricsRegisterer      prometheus.Registerer
+	NotifyInterval         time.Duration
+	EmulatedETCDVersion    string
+	CompactInterval        time.Duration
+	CompactIntervalJitter  int
+	CompactTimeout         time.Duration
+	CompactMinRetain       int64
+	CompactBatchSize       int64
+	PollBatchSize          int64
+	LogFormat              string
+	DisableNotifications   bool
+	NotificationBufferSize int
 }
 
 type ETCDConfig struct {
@@ -60,26 +60,20 @@ type ETCDConfig struct {
 	LeaderElect bool
 }
 
-func Listen(ctx context.Context, config Config) (etcd ETCDConfig, rerr error) {
-	wg := waitGroup(config)
-	bctx, bcancel := context.WithCancel(context.Background())
-	defer func() {
-		if rerr != nil {
-			bcancel()
-		}
-	}()
-
-	leaderElect, backend, err := drivers.New(bctx, wg, &drivers.Config{
-		MetricsRegisterer:     config.MetricsRegisterer,
-		Endpoint:              config.Endpoint,
-		BackendTLSConfig:      config.BackendTLSConfig,
-		ConnectionPoolConfig:  config.ConnectionPoolConfig,
-		CompactInterval:       config.CompactInterval,
-		CompactIntervalJitter: config.CompactIntervalJitter,
-		CompactTimeout:        config.CompactTimeout,
-		CompactMinRetain:      config.CompactMinRetain,
-		CompactBatchSize:      config.CompactBatchSize,
-		PollBatchSize:         config.PollBatchSize,
+func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
+	leaderElect, backend, err := drivers.New(ctx, &drivers.Config{
+		MetricsRegisterer:      config.MetricsRegisterer,
+		Endpoint:               config.Endpoint,
+		BackendTLSConfig:       config.BackendTLSConfig,
+		ConnectionPoolConfig:   config.ConnectionPoolConfig,
+		CompactInterval:        config.CompactInterval,
+		CompactIntervalJitter:  config.CompactIntervalJitter,
+		CompactTimeout:         config.CompactTimeout,
+		CompactMinRetain:       config.CompactMinRetain,
+		CompactBatchSize:       config.CompactBatchSize,
+		PollBatchSize:          config.PollBatchSize,
+		DisableNotifications:   config.DisableNotifications,
+		NotificationBufferSize: config.NotificationBufferSize,
 	})
 
 	if err != nil {
@@ -102,14 +96,8 @@ func Listen(ctx context.Context, config Config) (etcd ETCDConfig, rerr error) {
 		}, nil
 	}
 
-	if config.MetricsRegisterer != nil {
-		config.MetricsRegisterer.MustRegister(
-			metrics.SQLTotal,
-			metrics.SQLTime,
-			metrics.CompactTotal,
-			metrics.InsertErrorsTotal,
-		)
-	}
+	// Metrics are already registered in metrics/registry.go init()
+	// Skip duplicate registration to avoid panic
 
 	grpcServer, err := grpcServer(config)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/k3s-io/kine/pkg/broadcaster"
+	"github.com/k3s-io/kine/pkg/drivers/generic"
 	"github.com/k3s-io/kine/pkg/metrics"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/pkg/errors"
@@ -188,7 +189,7 @@ func (s *SQLLog) compactIter(compactRev, targetCompactRev int64) (int64, int64) 
 	}
 
 	if iterCount > 0 {
-		logrus.Infof("COMPACT compacted from %d to %d in %d transactions over %s", compactRev, compactedRev, iterCount, time.Since(iterStart).Round(time.Millisecond))
+		logrus.Infof("COMPACT compacted from %d to %d in %d transactions over %s", compactRev, compactedRev, iterCount, time.Now().Sub(iterStart).Round(time.Millisecond))
 
 		// post-compact operation errors are not critical, but should be reported
 		if perr := s.postCompact(); perr != nil {
@@ -290,18 +291,10 @@ func (s *SQLLog) postCompact() error {
 }
 
 func (s *SQLLog) CurrentRevision(ctx context.Context) (int64, error) {
-	currRev := s.currentRev.Load()
-	if currRev != 0 {
-		return currRev, nil
+	if s.currentRev != 0 {
+		return s.currentRev, nil
 	}
-	lastRev, err := s.d.CurrentRevision(ctx)
-	if err != nil {
-		return lastRev, err
-	}
-	if s.currentRev.CompareAndSwap(currRev, lastRev) {
-		return lastRev, nil
-	}
-	return s.currentRev.Load(), nil
+	return s.d.CurrentRevision(ctx)
 }
 
 func (s *SQLLog) CompactRevision(ctx context.Context) (int64, error) {
@@ -470,40 +463,6 @@ func (s *SQLLog) startWatch() (chan server.Events, error) {
 	go s.poll(c, pollStart)
 	return c, nil
 }
-
-func (s *SQLLog) poll(result chan server.Events, pollStart int64) {
-	var (
-		skip         int64
-		skipTime     time.Time
-		waitForMore  = true
-		pollRevision = pollStart
-	)
-
-	wait := time.NewTicker(time.Second)
-	defer wait.Stop()
-	defer close(result)
-
-	for {
-		if waitForMore {
-			select {
-			case <-s.ctx.Done():
-				return
-			case check := <-s.notify:
-				if check <= pollRevision {
-					continue
-				}
-			case <-wait.C:
-			}
-		}
-		waitForMore = true
-
-		//  update polled revision to reflect what rows have already been seen
-		s.Lock()
-		s.polledRev.Store(pollRevision)
-		s.polled.Broadcast()
-		s.Unlock()
-
-		rows, err := s.d.After(s.ctx, "%", pollRevision, s.pollBatchSize)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				logrus.Errorf("fail to list latest changes: %v", err)
@@ -517,7 +476,7 @@ func (s *SQLLog) poll(result chan server.Events, pollStart int64) {
 			continue
 		}
 
-		logrus.Tracef("POLL AFTER %d, limit=%d, events=%d", pollRevision, s.pollBatchSize, len(events))
+		logrus.Tracef("POLL AFTER %d, limit=%d, events=%d", s.currentRev, s.pollBatchSize, len(events))
 
 		if len(events) == 0 {
 			continue
@@ -525,7 +484,7 @@ func (s *SQLLog) poll(result chan server.Events, pollStart int64) {
 
 		waitForMore = len(events) < 100
 
-		rev := pollRevision
+		rev := s.currentRev
 		var (
 			sequential server.Events
 			saveLast   bool
@@ -587,8 +546,7 @@ func (s *SQLLog) poll(result chan server.Events, pollStart int64) {
 		}
 
 		if saveLast {
-			s.currentRev.CompareAndSwap(pollRevision, rev)
-			pollRevision = rev
+			s.currentRev = rev
 			if len(sequential) > 0 {
 				result <- sequential
 			}
@@ -638,7 +596,6 @@ func (s *SQLLog) Append(ctx context.Context, event *server.Event) (int64, error)
 	case s.notify <- rev:
 	default:
 	}
-	s.currentRev.Store(rev)
 	return rev, nil
 }
 
