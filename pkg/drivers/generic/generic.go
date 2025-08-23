@@ -97,6 +97,7 @@ type Generic struct {
 	TranslateErr          TranslateErr
 	ErrCode               ErrCode
 	FillRetryDuration     time.Duration
+	NotificationChannel   chan int64
 }
 
 func q(sql, param string, numbered bool) string {

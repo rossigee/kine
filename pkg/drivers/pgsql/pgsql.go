@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // sql driver
 	"github.com/k3s-io/kine/pkg/drivers"
 	"github.com/k3s-io/kine/pkg/drivers/generic"
 	"github.com/k3s-io/kine/pkg/logstructured"
 	"github.com/k3s-io/kine/pkg/logstructured/sqllog"
+	"github.com/k3s-io/kine/pkg/metrics"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/k3s-io/kine/pkg/tls"
 	"github.com/k3s-io/kine/pkg/util"
@@ -49,6 +51,23 @@ var (
 		`CREATE INDEX IF NOT EXISTS kine_prev_revision_index ON kine (prev_revision)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS kine_name_prev_revision_uindex ON kine (name, prev_revision)`,
 		`CREATE INDEX IF NOT EXISTS kine_list_query_index on kine(name, id DESC, deleted)`,
+
+		// Notification function and trigger for event-driven updates
+		`CREATE OR REPLACE FUNCTION kine_notify() RETURNS trigger AS $$
+		BEGIN
+			PERFORM pg_notify('kine_changes', NEW.id::text);
+			RETURN NEW;
+		END;
+		$$ LANGUAGE plpgsql`,
+
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'kine_insert_trigger') THEN
+				CREATE TRIGGER kine_insert_trigger 
+					AFTER INSERT ON kine 
+					FOR EACH ROW EXECUTE FUNCTION kine_notify();
+			END IF;
+		END $$`,
 	}
 	schemaMigrations = []string{
 		`ALTER TABLE kine ALTER COLUMN id SET DATA TYPE BIGINT, ALTER COLUMN create_revision SET DATA TYPE BIGINT, ALTER COLUMN prev_revision SET DATA TYPE BIGINT; ALTER SEQUENCE kine_id_seq AS BIGINT`,
@@ -156,6 +175,22 @@ func New(ctx context.Context, cfg *drivers.Config) (bool, server.Backend, error)
 
 	if err := setup(dialect.DB); err != nil {
 		return false, nil, err
+	}
+
+	// Initialize notification channel for event-driven updates if enabled
+	if !cfg.DisableNotifications {
+		bufferSize := cfg.NotificationBufferSize
+		if bufferSize <= 0 {
+			bufferSize = 1024 // Default buffer size
+		}
+		dialect.NotificationChannel = make(chan int64, bufferSize)
+		logrus.Debugf("Created notification channel with buffer size: %d", bufferSize)
+
+		// Start notification listener
+		go startNotificationListener(ctx, parsedDSN, dialect.NotificationChannel)
+		logrus.Info("PostgreSQL event-driven notifications enabled")
+	} else {
+		logrus.Info("PostgreSQL event-driven notifications disabled, using polling mode")
 	}
 
 	dialect.Migrate(context.Background())
@@ -295,6 +330,69 @@ func prepareDSN(dataSourceName string, tlsInfo tls.Config) (string, error) {
 	}
 	u.RawQuery = params.Encode()
 	return u.String(), nil
+}
+
+// startNotificationListener creates a dedicated connection for LISTEN/NOTIFY
+func startNotificationListener(ctx context.Context, dsn string, notifyChannel chan<- int64) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Create dedicated connection for notifications
+		conn, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			logrus.Errorf("Failed to create notification connection: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Start listening for notifications
+		_, err = conn.Exec(ctx, "LISTEN kine_changes")
+		if err != nil {
+			logrus.Errorf("Failed to LISTEN on kine_changes: %v", err)
+			conn.Close(ctx)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		logrus.Info("PostgreSQL notification listener started")
+
+		// Listen for notifications
+		for {
+			notificationStart := time.Now()
+			notification, err := conn.WaitForNotification(ctx)
+			if err != nil {
+				logrus.Errorf("Error waiting for notification: %v", err)
+				metrics.ObserveNotification("postgres", "error", time.Since(notificationStart))
+				break
+			}
+
+			// Parse revision from notification payload
+			if rev, parseErr := strconv.ParseInt(notification.Payload, 10, 64); parseErr == nil {
+				select {
+				case notifyChannel <- rev:
+					metrics.ObserveNotification("postgres", "success", time.Since(notificationStart))
+					metrics.SetNotificationQueueSize("postgres", float64(len(notifyChannel)))
+					logrus.Tracef("Received notification for revision: %d", rev)
+				default:
+					// Channel is full, skip this notification
+					metrics.ObserveNotification("postgres", "dropped", time.Since(notificationStart))
+					metrics.SetNotificationQueueSize("postgres", float64(len(notifyChannel)))
+					logrus.Debugf("Notification channel full, skipping revision: %d", rev)
+				}
+			} else {
+				metrics.ObserveNotification("postgres", "parse_error", time.Since(notificationStart))
+				logrus.Errorf("Invalid notification payload: %s", notification.Payload)
+			}
+		}
+
+		conn.Close(ctx)
+		logrus.Warn("Notification listener disconnected, attempting to reconnect...")
+		time.Sleep(1 * time.Second)
+	}
 }
 
 func init() {

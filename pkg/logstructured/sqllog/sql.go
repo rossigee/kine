@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/k3s-io/kine/pkg/broadcaster"
+	"github.com/k3s-io/kine/pkg/drivers/generic"
 	"github.com/k3s-io/kine/pkg/metrics"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/pkg/errors"
@@ -472,14 +473,37 @@ func (s *SQLLog) poll(result chan interface{}, pollStart int64) {
 
 	for {
 		if waitForMore {
-			select {
-			case <-s.ctx.Done():
-				return
-			case check := <-s.notify:
-				if check <= s.currentRev {
-					continue
+			// Get notification channel from dialect if available
+			var dialectNotify <-chan int64
+			if genericDialect, ok := s.d.(*generic.Generic); ok && genericDialect.NotificationChannel != nil {
+				dialectNotify = genericDialect.NotificationChannel
+			}
+
+			if dialectNotify != nil {
+				select {
+				case <-s.ctx.Done():
+					return
+				case check := <-s.notify:
+					if check <= s.currentRev {
+						continue
+					}
+				case check := <-dialectNotify:
+					if check <= s.currentRev {
+						continue
+					}
+					logrus.Tracef("Event-driven notification received for revision: %d", check)
+				case <-wait.C:
 				}
-			case <-wait.C:
+			} else {
+				select {
+				case <-s.ctx.Done():
+					return
+				case check := <-s.notify:
+					if check <= s.currentRev {
+						continue
+					}
+				case <-wait.C:
+				}
 			}
 		}
 		waitForMore = true

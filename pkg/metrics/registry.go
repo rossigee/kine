@@ -18,5 +18,13 @@ func init() {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		// expose Go runtime metrics like GC stats, memory stats etc.
 		collectors.NewGoCollector(),
+		// Kine-specific metrics
+		SQLTotal,
+		SQLTime,
+		CompactTotal,
+		InsertErrorsTotal,
+		NotificationTotal,
+		NotificationLatency,
+		NotificationQueueSize,
 	)
 }
