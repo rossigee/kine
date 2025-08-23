@@ -1,0 +1,31 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: etcd-migrate
+  namespace: kamaji-system
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: etcd-migrate
+        image: golang:1.21-alpine
+        command: ["/bin/sh"]
+        args:
+          - -c
+          - |
+            apk add --no-cache git curl
+            cd /tmp
+            git clone https://github.com/k3s-io/kine.git
+            cd kine/cmd/etcd-migrate
+            go build -o etcd-migrate .
+            ./etcd-migrate -snapshot /backup/etcd-backup-20250822-190248.db -kine-endpoint http://kine.kamaji-system.svc.cluster.local:2379 -batch-size 10 -progress 50
+        volumeMounts:
+        - name: backup-volume
+          mountPath: /backup
+          readOnly: true
+      volumes:
+      - name: backup-volume
+        hostPath:
+          path: /home/rossg/infrastructure/flux-golder
+          type: Directory
