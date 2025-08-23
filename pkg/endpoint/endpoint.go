@@ -52,6 +52,7 @@ type Config struct {
 	LogFormat              string
 	DisableNotifications   bool
 	NotificationBufferSize int
+	WaitGroup              *sync.WaitGroup
 }
 
 type ETCDConfig struct {
@@ -61,7 +62,9 @@ type ETCDConfig struct {
 }
 
 func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
-	leaderElect, backend, err := drivers.New(ctx, &drivers.Config{
+	wg := waitGroup(config)
+
+	leaderElect, backend, err := drivers.New(ctx, wg, &drivers.Config{
 		MetricsRegisterer:      config.MetricsRegisterer,
 		Endpoint:               config.Endpoint,
 		BackendTLSConfig:       config.BackendTLSConfig,
@@ -87,6 +90,8 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 		return ETCDConfig{}, errors.Wrap(err, "failed to create driver for "+epType)
 	}
 
+	bctx, bcancel := context.WithCancel(ctx)
+
 	if backend == nil {
 		bcancel()
 		return ETCDConfig{
@@ -101,6 +106,7 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 
 	grpcServer, err := grpcServer(config)
 	if err != nil {
+		bcancel()
 		return ETCDConfig{}, errors.Wrap(err, "creating GRPC server")
 	}
 
@@ -114,6 +120,7 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 	}()
 
 	if err := backend.Start(bctx); err != nil {
+		bcancel()
 		return ETCDConfig{}, errors.Wrap(err, "starting kine backend")
 	}
 
