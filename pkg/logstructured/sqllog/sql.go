@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/k3s-io/kine/pkg/broadcaster"
+	"github.com/k3s-io/kine/pkg/drivers/generic"
 	"github.com/k3s-io/kine/pkg/metrics"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/pkg/errors"
@@ -23,7 +23,7 @@ type SQLLog struct {
 	broadcaster           broadcaster.Broadcaster
 	ctx                   context.Context
 	notify                chan int64
-	currentRev            atomic.Int64
+	currentRev            int64
 	compactInterval       time.Duration
 	compactIntervalJitter int
 	compactTimeout        time.Duration
@@ -182,7 +182,7 @@ func (s *SQLLog) compactIter(compactRev, targetCompactRev int64) (int64, int64) 
 	}
 
 	if iterCount > 0 {
-		logrus.Infof("COMPACT compacted from %d to %d in %d transactions over %s", compactRev, compactedRev, iterCount, time.Since(iterStart).Round(time.Millisecond))
+		logrus.Infof("COMPACT compacted from %d to %d in %d transactions over %s", compactRev, compactedRev, iterCount, time.Now().Sub(iterStart).Round(time.Millisecond))
 
 		// post-compact operation errors are not critical, but should be reported
 		if perr := s.postCompact(); perr != nil {
@@ -284,18 +284,10 @@ func (s *SQLLog) postCompact() error {
 }
 
 func (s *SQLLog) CurrentRevision(ctx context.Context) (int64, error) {
-	currRev := s.currentRev.Load()
-	if currRev != 0 {
-		return currRev, nil
+	if s.currentRev != 0 {
+		return s.currentRev, nil
 	}
-	lastRev, err := s.d.CurrentRevision(ctx)
-	if err != nil {
-		return lastRev, err
-	}
-	if s.currentRev.CompareAndSwap(currRev, lastRev) {
-		return lastRev, nil
-	}
-	return s.currentRev.Load(), nil
+	return s.d.CurrentRevision(ctx)
 }
 
 func (s *SQLLog) CompactRevision(ctx context.Context) (int64, error) {
@@ -477,11 +469,12 @@ func (s *SQLLog) startWatch() (chan interface{}, error) {
 }
 
 func (s *SQLLog) poll(result chan interface{}, pollStart int64) {
+	s.currentRev = pollStart
+
 	var (
-		skip         int64
-		skipTime     time.Time
-		waitForMore  = true
-		pollRevision = pollStart
+		skip        int64
+		skipTime    time.Time
+		waitForMore = true
 	)
 
 	wait := time.NewTicker(time.Second)
@@ -490,19 +483,42 @@ func (s *SQLLog) poll(result chan interface{}, pollStart int64) {
 
 	for {
 		if waitForMore {
-			select {
-			case <-s.ctx.Done():
-				return
-			case check := <-s.notify:
-				if check <= pollRevision {
-					continue
+			// Get notification channel from dialect if available
+			var dialectNotify <-chan int64
+			if genericDialect, ok := s.d.(*generic.Generic); ok && genericDialect.NotificationChannel != nil {
+				dialectNotify = genericDialect.NotificationChannel
+			}
+
+			if dialectNotify != nil {
+				select {
+				case <-s.ctx.Done():
+					return
+				case check := <-s.notify:
+					if check <= s.currentRev {
+						continue
+					}
+				case check := <-dialectNotify:
+					if check <= s.currentRev {
+						continue
+					}
+					logrus.Tracef("Event-driven notification received for revision: %d", check)
+				case <-wait.C:
 				}
-			case <-wait.C:
+			} else {
+				select {
+				case <-s.ctx.Done():
+					return
+				case check := <-s.notify:
+					if check <= s.currentRev {
+						continue
+					}
+				case <-wait.C:
+				}
 			}
 		}
 		waitForMore = true
 
-		rows, err := s.d.After(s.ctx, "%", pollRevision, s.pollBatchSize)
+		rows, err := s.d.After(s.ctx, "%", s.currentRev, s.pollBatchSize)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				logrus.Errorf("fail to list latest changes: %v", err)
@@ -516,7 +532,7 @@ func (s *SQLLog) poll(result chan interface{}, pollStart int64) {
 			continue
 		}
 
-		logrus.Tracef("POLL AFTER %d, limit=%d, events=%d", pollRevision, s.pollBatchSize, len(events))
+		logrus.Tracef("POLL AFTER %d, limit=%d, events=%d", s.currentRev, s.pollBatchSize, len(events))
 
 		if len(events) == 0 {
 			continue
@@ -524,7 +540,7 @@ func (s *SQLLog) poll(result chan interface{}, pollStart int64) {
 
 		waitForMore = len(events) < 100
 
-		rev := pollRevision
+		rev := s.currentRev
 		var (
 			sequential []*server.Event
 			saveLast   bool
@@ -586,8 +602,7 @@ func (s *SQLLog) poll(result chan interface{}, pollStart int64) {
 		}
 
 		if saveLast {
-			s.currentRev.CompareAndSwap(pollRevision, rev)
-			pollRevision = rev
+			s.currentRev = rev
 			if len(sequential) > 0 {
 				result <- sequential
 			}
@@ -635,7 +650,6 @@ func (s *SQLLog) Append(ctx context.Context, event *server.Event) (int64, error)
 	case s.notify <- rev:
 	default:
 	}
-	s.currentRev.Store(rev)
 	return rev, nil
 }
 
