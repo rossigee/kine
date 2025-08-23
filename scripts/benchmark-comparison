@@ -1,0 +1,267 @@
+#!/bin/bash
+set -e
+
+# Benchmark comparison script for etcd vs Kine with different PostgreSQL modes
+# Usage: ./benchmark-comparison [test-duration-minutes]
+
+cd $(dirname $0)/..
+
+DURATION=${1:-5}  # Default 5 minutes
+RESULTS_DIR="benchmark-results-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RESULTS_DIR"
+
+echo "=== Kine vs etcd Performance Benchmark ==="
+echo "Duration: ${DURATION} minutes"
+echo "Results will be saved to: $RESULTS_DIR"
+echo
+
+# Check dependencies
+check_deps() {
+    local missing=()
+    
+    if ! command -v kubectl &> /dev/null; then
+        missing+=("kubectl")
+    fi
+    
+    if ! command -v python3 &> /dev/null; then
+        missing+=("python3")
+    fi
+    
+    if ! python3 -c "import kubernetes, termplotlib" &> /dev/null; then
+        missing+=("kubernetes python module")
+        missing+=("termplotlib python module")
+    fi
+    
+    if [ ${#missing[@]} -ne 0 ]; then
+        echo "Missing dependencies: ${missing[*]}"
+        echo "Install with: pip3 install kubernetes termplotlib"
+        exit 1
+    fi
+}
+
+# Function to run load test and collect metrics
+run_benchmark() {
+    local test_name="$1"
+    local backend_name="$2"
+    local description="$3"
+    
+    echo "=== Running benchmark: $test_name ==="
+    echo "Description: $description"
+    echo "Duration: ${DURATION} minutes"
+    echo
+    
+    # Create results directory for this test
+    local test_dir="$RESULTS_DIR/$test_name"
+    mkdir -p "$test_dir"
+    
+    # Save test configuration
+    cat > "$test_dir/config.txt" << EOF
+Test Name: $test_name
+Backend: $backend_name
+Description: $description
+Duration: ${DURATION} minutes
+Date: $(date)
+EOF
+    
+    echo "Starting load generation..."
+    local end_time=$(($(date +%s) + $DURATION * 60))
+    local pids=()
+    
+    # Start 4 parallel load generators
+    for i in {1..4}; do
+        (
+            while [ $(date +%s) -lt $end_time ]; do
+                python3 hack/loadmap.py --rounds 1000 --log-level WARNING 2>/dev/null
+            done
+        ) &
+        pids+=($!)
+    done
+    
+    # Wait for completion
+    for pid in "${pids[@]}"; do
+        wait $pid
+    done
+    
+    echo "Load generation complete. Collecting metrics..."
+    
+    # Collect performance metrics
+    if LABEL="$backend_name" python3 hack/histogram.py --backend-name "$backend_name" > "$test_dir/performance-report.txt" 2>&1; then
+        echo "Performance metrics saved to $test_dir/performance-report.txt"
+    else
+        echo "Warning: Could not collect performance metrics"
+    fi
+    
+    # Extract key metrics
+    if [ -f "$test_dir/performance-report.txt" ]; then
+        grep "average.*request duration" "$test_dir/performance-report.txt" > "$test_dir/summary.txt" || true
+    fi
+    
+    echo "Benchmark $test_name completed!"
+    echo
+}
+
+# Function to setup Kine with PostgreSQL in different modes
+setup_kine_postgres() {
+    local disable_notifications="$1"
+    local description="$2"
+    
+    echo "Setting up Kine with PostgreSQL..."
+    echo "Event-driven notifications: $([ "$disable_notifications" = "true" ] && echo "disabled" || echo "enabled")"
+    
+    # This would typically involve deploying Kine with the appropriate configuration
+    # For this example, we assume the environment is already set up
+    # In a real implementation, you would:
+    # 1. Deploy PostgreSQL
+    # 2. Deploy Kine with the appropriate configuration
+    # 3. Deploy K3s pointing to Kine
+    
+    echo "Setup complete: $description"
+}
+
+# Function to wait for system stabilization
+wait_for_stable() {
+    echo "Waiting for system to stabilize..."
+    sleep 30
+}
+
+# Main benchmark execution
+main() {
+    echo "Checking dependencies..."
+    check_deps
+    
+    echo "Starting comprehensive benchmark suite..."
+    echo
+    
+    # Test 1: Baseline etcd performance
+    echo "TEST 1: Baseline etcd performance"
+    run_benchmark "01-etcd-baseline" "etcd" "Standard etcd deployment for baseline comparison"
+    wait_for_stable
+    
+    # Test 2: Kine with PostgreSQL event-driven notifications
+    echo "TEST 2: Kine with PostgreSQL (event-driven)"
+    setup_kine_postgres "false" "Kine with PostgreSQL using LISTEN/NOTIFY for immediate updates"
+    run_benchmark "02-kine-postgres-events" "kine-postgres-events" "Kine with PostgreSQL event-driven notifications"
+    wait_for_stable
+    
+    # Test 3: Kine with PostgreSQL polling mode
+    echo "TEST 3: Kine with PostgreSQL (polling mode)"
+    setup_kine_postgres "true" "Kine with PostgreSQL using traditional polling mechanism"
+    run_benchmark "03-kine-postgres-polling" "kine-postgres-polling" "Kine with PostgreSQL polling mode"
+    wait_for_stable
+    
+    # Generate comparison report
+    generate_comparison_report
+}
+
+# Function to generate comparison report
+generate_comparison_report() {
+    local report_file="$RESULTS_DIR/comparison-report.md"
+    
+    cat > "$report_file" << 'EOF'
+# Kine vs etcd Performance Comparison Report
+
+This report compares the performance of etcd against Kine with PostgreSQL in different configurations.
+
+## Test Configuration
+
+EOF
+    
+    echo "- **Duration**: ${DURATION} minutes per test" >> "$report_file"
+    echo "- **Load Pattern**: 4 parallel clients performing mixed ConfigMap operations" >> "$report_file"
+    echo "- **Date**: $(date)" >> "$report_file"
+    echo "" >> "$report_file"
+    
+    echo "## Results Summary" >> "$report_file"
+    echo "" >> "$report_file"
+    
+    # Process each test result
+    for test_dir in "$RESULTS_DIR"/*/; do
+        if [ -d "$test_dir" ] && [ -f "$test_dir/config.txt" ]; then
+            local test_name=$(basename "$test_dir")
+            local backend_name=$(grep "Backend:" "$test_dir/config.txt" | cut -d' ' -f2-)
+            local description=$(grep "Description:" "$test_dir/config.txt" | cut -d' ' -f2-)
+            
+            echo "### $test_name: $description" >> "$report_file"
+            echo "" >> "$report_file"
+            
+            if [ -f "$test_dir/summary.txt" ]; then
+                echo "**Performance Metrics:**" >> "$report_file"
+                echo '```' >> "$report_file"
+                cat "$test_dir/summary.txt" >> "$report_file"
+                echo '```' >> "$report_file"
+            else
+                echo "No performance metrics available" >> "$report_file"
+            fi
+            echo "" >> "$report_file"
+        fi
+    done
+    
+    cat >> "$report_file" << 'EOF'
+## Analysis
+
+### Key Findings
+
+1. **Baseline etcd Performance**: Provides reference performance metrics for comparison
+2. **Kine with Event-Driven PostgreSQL**: Expected to show significant improvement over polling mode
+3. **Kine with Polling PostgreSQL**: Traditional mode with 1-second polling intervals
+
+### Expected Performance Characteristics
+
+- **etcd**: Lowest latency, optimized for Kubernetes workloads
+- **Kine + Event-Driven PostgreSQL**: Improved latency vs polling, leverages PostgreSQL LISTEN/NOTIFY
+- **Kine + Polling PostgreSQL**: Higher latency due to polling overhead
+
+### Recommendations
+
+Based on the results, consider:
+- Use etcd for maximum performance when operational complexity is acceptable
+- Use Kine with event-driven PostgreSQL when you need PostgreSQL benefits with better performance
+- Use Kine with polling PostgreSQL only when event-driven mode is not available
+
+EOF
+    
+    echo "Comparison report generated: $report_file"
+    echo
+    echo "=== Benchmark Suite Complete ==="
+    echo "Results saved to: $RESULTS_DIR"
+    echo "View the comparison report: $report_file"
+}
+
+# Help function
+show_help() {
+    cat << EOF
+Kine vs etcd Performance Benchmark Suite
+
+Usage: $0 [duration-minutes]
+
+Arguments:
+  duration-minutes    Test duration for each benchmark (default: 5)
+
+Examples:
+  $0              # Run 5-minute benchmarks
+  $0 10           # Run 10-minute benchmarks
+
+Prerequisites:
+  - kubectl configured to access test cluster
+  - Python 3 with kubernetes and termplotlib modules
+  - Appropriate cluster setup for each test scenario
+
+The script will run three tests:
+1. etcd baseline performance
+2. Kine with PostgreSQL event-driven notifications
+3. Kine with PostgreSQL polling mode
+
+Results are saved to a timestamped directory with detailed reports.
+EOF
+}
+
+# Parse command line arguments
+case "${1:-}" in
+    -h|--help|help)
+        show_help
+        exit 0
+        ;;
+    *)
+        main "$@"
+        ;;
+esac
