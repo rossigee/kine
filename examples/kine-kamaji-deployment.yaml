@@ -1,0 +1,233 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kine
+  namespace: kamaji-system
+  labels:
+    app: kine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kine
+  namespace: kamaji-system
+  labels:
+    app: kine
+    component: kine-server
+  annotations:
+    kubernetes.io/description: "Kine etcd-compatible API server with PostgreSQL backend"
+spec:
+  type: ClusterIP
+  selector:
+    app: kine
+    component: kine-server
+  ports:
+  - name: client
+    port: 2379
+    targetPort: 2379
+    protocol: TCP
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kine-config
+  namespace: kamaji-system
+  labels:
+    app: kine
+data:
+  kine.conf: |
+    # Kine Configuration
+    listen-address = "0.0.0.0:2379"
+    metrics-bind-address = ":8080"
+    debug = false
+    
+    # PostgreSQL event-driven notifications (enabled by default)
+    # disable-notifications = false
+    notification-buffer-size = 2048
+    
+    # Database connection tuning
+    datastore-max-idle-connections = 10
+    datastore-max-open-connections = 100
+    datastore-connection-max-lifetime = "30m"
+    
+    # Performance tuning
+    slow-sql-threshold = "1s"
+    slow-sql-warning-threshold = "5s"
+    
+    # Compaction settings
+    compact-interval = "5m"
+    compact-min-retain = 1000
+    compact-batch-size = 1000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kine
+  namespace: kamaji-system
+  labels:
+    app: kine
+    component: kine-server
+  annotations:
+    kubernetes.io/description: "Kine etcd-compatible API server with PostgreSQL backend and event-driven notifications"
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: kine
+      component: kine-server
+  template:
+    metadata:
+      labels:
+        app: kine
+        component: kine-server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: kine
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: kine
+        image: ghcr.io/rossigee/kine:events-latest
+        imagePullPolicy: Always
+        args:
+        - --listen-address=0.0.0.0:2379
+        - --endpoint=$(DATABASE_URL)
+        - --metrics-bind-address=0
+        - --debug=false
+        - --notification-buffer-size=2048
+        - --datastore-max-idle-connections=10
+        - --datastore-max-open-connections=100
+        - --datastore-connection-max-lifetime=30m
+        - --slow-sql-threshold=1s
+        - --slow-sql-warning-threshold=5s
+        - --compact-interval=5m
+        - --compact-min-retain=1000
+        - --compact-batch-size=1000
+        - --server-cert-file=/etc/kine-certs/tls.crt
+        - --server-key-file=/etc/kine-certs/tls.key
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: etcd-db-app
+              key: uri
+        ports:
+        - name: client
+          containerPort: 2379
+          protocol: TCP
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          tcpSocket:
+            port: 2379
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 2379
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        startupProbe:
+          tcpSocket:
+            port: 2379
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 30
+        volumeMounts:
+        - name: config
+          mountPath: /etc/kine
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: kine-certs
+          mountPath: /etc/kine-certs
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: kine-config
+      - name: tmp
+        emptyDir: {}
+      - name: kine-certs
+        secret:
+          secretName: root-client-certs
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - kine
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kine-headless
+  namespace: kamaji-system
+  labels:
+    app: kine
+    component: kine-server
+  annotations:
+    kubernetes.io/description: "Headless service for Kine server discovery"
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: kine
+    component: kine-server
+  ports:
+  - name: client
+    port: 2379
+    targetPort: 2379
+    protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kine
+  namespace: kamaji-system
+  labels:
+    app: kine
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: kine
+      component: kine-server
