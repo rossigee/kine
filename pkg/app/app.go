@@ -196,6 +196,24 @@ func New() *cli.App {
 			Name:    "debug",
 			EnvVars: []string{"KINE_DEBUG"},
 		},
+<<<<<<< HEAD
+=======
+		&cli.BoolFlag{
+			Name:        "disable-notifications",
+			Usage:       "Disable PostgreSQL event-driven notifications and use polling mode only. Default is false.",
+			Destination: &config.DisableNotifications,
+			Value:       false,
+			EnvVars:     []string{"KINE_DISABLE_NOTIFICATIONS"},
+		},
+		&cli.IntFlag{
+			Name:        "notification-buffer-size",
+			Usage:       "Size of notification channel buffer for PostgreSQL LISTEN/NOTIFY. Default is 1024.",
+			Destination: &config.NotificationBufferSize,
+			Value:       1024,
+			EnvVars:     []string{"KINE_NOTIFICATION_BUFFER_SIZE"},
+		},
+		&cli.BoolFlag{Name: "debug"},
+>>>>>>> 9150e6c (Add PostgreSQL event-driven notifications for improved watch performance)
 	}
 	app.Action = run
 	return app
