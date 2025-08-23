@@ -23,7 +23,7 @@ func newMockBackend() *mockBackend {
 
 func (m *mockBackend) Start(ctx context.Context) error { return nil }
 
-func (m *mockBackend) Get(ctx context.Context, key, rangeEnd string, limit, revision int64) (int64, *KeyValue, error) {
+func (m *mockBackend) Get(ctx context.Context, key, rangeEnd string, limit, revision int64, keysOnly bool) (int64, *KeyValue, error) {
 	if kv, exists := m.data[key]; exists {
 		return m.rev, kv, nil
 	}
@@ -72,7 +72,7 @@ func (m *mockBackend) Delete(ctx context.Context, key string, revision int64) (i
 	return m.rev, nil, false, nil
 }
 
-func (m *mockBackend) List(ctx context.Context, prefix, startKey string, limit, revision int64) (int64, []*KeyValue, error) {
+func (m *mockBackend) List(ctx context.Context, prefix, startKey string, limit, revision int64, keysOnly bool) (int64, []*KeyValue, error) {
 	var kvs []*KeyValue
 	for key, kv := range m.data {
 		// Check prefix match
@@ -158,7 +158,7 @@ func TestLimitedServer_Put(t *testing.T) {
 		}
 
 		// Verify key was created
-		_, kv, err := backend.Get(ctx, "test-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "test-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get failed: %v", err)
 		}
@@ -193,7 +193,7 @@ func TestLimitedServer_Put(t *testing.T) {
 		}
 
 		// Verify key was updated
-		_, kv, err := backend.Get(ctx, "update-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "update-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get failed: %v", err)
 		}
@@ -274,7 +274,7 @@ func TestKVServerBridge_Put(t *testing.T) {
 	}
 
 	// Verify through backend
-	_, kv, err := backend.Get(ctx, "bridge-test-key", "", 1, 0)
+	_, kv, err := backend.Get(ctx, "bridge-test-key", "", 1, 0, false)
 	if err != nil {
 		t.Fatalf("Backend Get failed: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestLimitedServer_DeleteRange(t *testing.T) {
 		}
 
 		// Verify key was deleted
-		_, kv, err := backend.Get(ctx, "delete-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "delete-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get after delete failed: %v", err)
 		}
@@ -537,7 +537,7 @@ func TestLimitedServer_DeleteRange(t *testing.T) {
 		// Verify range keys were deleted
 		for i := 1; i <= 3; i++ {
 			key := fmt.Sprintf("range-key%d", i)
-			_, kv, err := backend.Get(ctx, key, "", 1, 0)
+			_, kv, err := backend.Get(ctx, key, "", 1, 0, false)
 			if err != nil {
 				t.Fatalf("Get after range delete failed: %v", err)
 			}
@@ -547,7 +547,7 @@ func TestLimitedServer_DeleteRange(t *testing.T) {
 		}
 
 		// Verify other key was not deleted
-		_, kv, err := backend.Get(ctx, "other-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "other-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get other-key after range delete failed: %v", err)
 		}
@@ -615,7 +615,7 @@ func TestKVServerBridge_DeleteRange(t *testing.T) {
 	}
 
 	// Verify through backend
-	_, kv, err := backend.Get(ctx, "bridge-delete-key", "", 1, 0)
+	_, kv, err := backend.Get(ctx, "bridge-delete-key", "", 1, 0, false)
 	if err != nil {
 		t.Fatalf("Backend Get after bridge delete failed: %v", err)
 	}
@@ -646,7 +646,7 @@ func TestPutRegressionTests(t *testing.T) {
 		}
 
 		// Verify empty key was created
-		_, kv, err := backend.Get(ctx, "", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get empty key failed: %v", err)
 		}
@@ -671,7 +671,7 @@ func TestPutRegressionTests(t *testing.T) {
 		}
 
 		// Verify empty value was stored
-		_, kv, err := backend.Get(ctx, "empty-value-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "empty-value-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get empty value failed: %v", err)
 		}
@@ -699,7 +699,7 @@ func TestPutRegressionTests(t *testing.T) {
 		}
 
 		// Verify nil value was handled properly
-		_, kv, err := backend.Get(ctx, "nil-value-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "nil-value-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get nil value failed: %v", err)
 		}
@@ -729,7 +729,7 @@ func TestPutRegressionTests(t *testing.T) {
 		}
 
 		// Verify large value was stored correctly
-		_, kv, err := backend.Get(ctx, "large-value-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "large-value-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get large value failed: %v", err)
 		}
@@ -754,7 +754,7 @@ func TestPutRegressionTests(t *testing.T) {
 		}
 
 		// Verify lease was preserved
-		_, kv, err := backend.Get(ctx, "lease-key", "", 1, 0)
+		_, kv, err := backend.Get(ctx, "lease-key", "", 1, 0, false)
 		if err != nil {
 			t.Fatalf("Get lease key failed: %v", err)
 		}
@@ -955,7 +955,7 @@ func TestConcurrentPutOperations(t *testing.T) {
 		// Verify all keys were created
 		for i := 0; i < 10; i++ {
 			key := fmt.Sprintf("concurrent-key-%d", i)
-			_, kv, err := backend.Get(ctx, key, "", 1, 0)
+			_, kv, err := backend.Get(ctx, key, "", 1, 0, false)
 			if err != nil {
 				t.Fatalf("Get concurrent key %s failed: %v", key, err)
 			}

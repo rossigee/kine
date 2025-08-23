@@ -13,10 +13,6 @@ import (
 var _ etcdserverpb.KVServer = (*KVServerBridge)(nil)
 
 func (k *KVServerBridge) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
-<<<<<<< HEAD
-=======
-
->>>>>>> 9150e6c (Add PostgreSQL event-driven notifications for improved watch performance)
 	if r.MaxCreateRevision != 0 {
 		return nil, unsupported("maxCreateRevision")
 	}
