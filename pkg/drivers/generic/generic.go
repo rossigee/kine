@@ -77,31 +77,35 @@ type ConnectionPoolConfig struct {
 type Generic struct {
 	sync.Mutex
 
-	LockWrites            bool
-	LastInsertID          bool
-	DB                    *sql.DB
-	GetCurrentSQL         string
-	GetRevisionSQL        string
-	RevisionSQL           string
-	ListRevisionStartSQL  string
-	GetRevisionAfterSQL   string
-	CountCurrentSQL       string
-	CountRevisionSQL      string
-	AfterSQL              string
-	DeleteSQL             string
-	CompactSQL            string
-	UpdateCompactSQL      string
-	PostCompactSQL        string
-	InsertSQL             string
-	FillSQL               string
-	InsertLastInsertIDSQL string
-	GetSizeSQL            string
-	Retry                 ErrRetry
-	InsertRetry           ErrRetry
-	TranslateErr          TranslateErr
-	ErrCode               ErrCode
-	FillRetryDuration     time.Duration
-	NotificationChannel   chan int64
+	LockWrites              bool
+	LastInsertID            bool
+	DB                      *sql.DB
+	GetCurrentSQL           string
+	GetCurrentValSQL        string
+	GetRevisionSQL          string
+	RevisionSQL             string
+	ListRevisionStartSQL    string
+	ListRevisionStartValSQL string
+	GetRevisionAfterSQL     string
+	GetRevisionAfterValSQL  string
+	CountCurrentSQL         string
+	CountRevisionSQL        string
+	AfterSQL                string
+	AfterOldValSQL          string
+	DeleteSQL               string
+	CompactSQL              string
+	UpdateCompactSQL        string
+	PostCompactSQL          string
+	InsertSQL               string
+	FillSQL                 string
+	InsertLastInsertIDSQL   string
+	GetSizeSQL              string
+	Retry                   ErrRetry
+	InsertRetry             ErrRetry
+	TranslateErr            TranslateErr
+	ErrCode                 ErrCode
+	FillRetryDuration       time.Duration
+	NotificationChannel     chan int64
 }
 
 func q(sql, param string, numbered bool) string {

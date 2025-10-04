@@ -56,7 +56,7 @@ func (l *LimitedServer) Put(ctx context.Context, r *etcdserverpb.PutRequest) (*e
 
 	// If PrevKv is requested, get the current value before updating
 	if r.PrevKv {
-		_, kv, _ := l.backend.Get(ctx, key, "", 1, 0)
+		_, kv, _ := l.backend.Get(ctx, key, "", 1, 0, false)
 		if kv != nil {
 			// Make a deep copy to avoid issues with shared memory
 			prevKv = &KeyValue{
@@ -74,7 +74,7 @@ func (l *LimitedServer) Put(ctx context.Context, r *etcdserverpb.PutRequest) (*e
 	rev, err := l.backend.Create(ctx, key, r.Value, r.Lease)
 	if err == ErrKeyExists {
 		// Key exists, get current revision and update
-		_, kv, getErr := l.backend.Get(ctx, key, "", 1, 0)
+		_, kv, getErr := l.backend.Get(ctx, key, "", 1, 0, false)
 		if getErr != nil {
 			return nil, getErr
 		}
@@ -157,7 +157,7 @@ func (l *LimitedServer) DeleteRange(ctx context.Context, r *etcdserverpb.DeleteR
 	rangeEnd := string(r.RangeEnd)
 
 	// First, list all keys in the range to potentially delete
-	rev, kvs, err := l.backend.List(ctx, key, "", 0, 0) // Get all keys with prefix
+	rev, kvs, err := l.backend.List(ctx, key, "", 0, 0, false) // Get all keys with prefix
 	if err != nil {
 		return nil, err
 	}

@@ -56,7 +56,8 @@ type ETCDConfig struct {
 }
 
 func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
-	leaderElect, backend, err := drivers.New(ctx, &drivers.Config{
+	wg := waitGroup(config)
+	leaderElect, backend, err := drivers.New(ctx, wg, &drivers.Config{
 		MetricsRegisterer:      config.MetricsRegisterer,
 		Endpoint:               config.Endpoint,
 		BackendTLSConfig:       config.BackendTLSConfig,
@@ -82,10 +83,7 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 		return ETCDConfig{}, errors.Wrap(err, "failed to create driver for "+epType)
 	}
 
-	bctx, bcancel := context.WithCancel(ctx)
-
 	if backend == nil {
-		bcancel()
 		return ETCDConfig{
 			Endpoints:   strings.Split(config.Endpoint, ","),
 			TLSConfig:   config.BackendTLSConfig,
@@ -93,15 +91,16 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 		}, nil
 	}
 
+	bctx, bcancel := context.WithCancel(ctx)
+
 	// Metrics are already registered in metrics/registry.go init()
 	// Skip duplicate registration to avoid panic
 
 	grpcServer, err := grpcServer(config)
 	if err != nil {
+		bcancel()
 		return ETCDConfig{}, errors.Wrap(err, "creating GRPC server")
 	}
-
-	wg := waitGroup(config)
 
 	go func() {
 		<-ctx.Done()
@@ -113,6 +112,7 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 	}()
 
 	if err := backend.Start(bctx); err != nil {
+		bcancel()
 		return ETCDConfig{}, errors.Wrap(err, "starting kine backend")
 	}
 
@@ -123,6 +123,7 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 	// Create raw listener and wrap in cmux for protocol switching
 	listener, err := createListener(bctx, config)
 	if err != nil {
+		bcancel()
 		return ETCDConfig{}, errors.Wrap(err, "creating listener")
 	}
 

@@ -36,5 +36,9 @@ multi-arch-build:
 package:
 	ARCH=$(ARCH) ./scripts/package
 
+.PHONY: test
+test:
+	./scripts/test
+
 .PHONY: ci
 ci: validate build package
