@@ -17,7 +17,7 @@ jobs:
       id-token: write # needed for the Vault authentication
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -34,7 +34,7 @@ jobs:
           done
           
       - name: Upload binaries to release
-        uses: softprops/action-gh-release@v2.3.2 # https://github.com/softprops/action-gh-release/issues/587
+        uses: softprops/action-gh-release@v2.3.3 # https://github.com/softprops/action-gh-release/issues/587
         with:
           files: |
             dist/artifacts/kine-*

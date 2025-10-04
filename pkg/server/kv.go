@@ -13,7 +13,6 @@ import (
 var _ etcdserverpb.KVServer = (*KVServerBridge)(nil)
 
 func (k *KVServerBridge) Range(ctx context.Context, r *etcdserverpb.RangeRequest) (*etcdserverpb.RangeResponse, error) {
-
 	if r.MaxCreateRevision != 0 {
 		return nil, unsupported("maxCreateRevision")
 	}
@@ -36,10 +35,6 @@ func (k *KVServerBridge) Range(ctx context.Context, r *etcdserverpb.RangeRequest
 
 	if r.MinCreateRevision != 0 {
 		return nil, unsupported("minCreateRevision")
-	}
-
-	if r.MaxCreateRevision != 0 {
-		return nil, unsupported("maxCreateRevision")
 	}
 
 	if r.MaxModRevision != 0 {
@@ -89,6 +84,10 @@ func toKVs(kvs ...*KeyValue) []*mvccpb.KeyValue {
 func toKV(kv *KeyValue) *mvccpb.KeyValue {
 	if kv == nil {
 		return nil
+	}
+	// fix up apiserver watch with original compact revision key
+	if kv.Key == compactRevAPI {
+		kv.Key = compactRevKey
 	}
 	return &mvccpb.KeyValue{
 		Key:            []byte(kv.Key),

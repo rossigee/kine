@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/k3s-io/kine/pkg/drivers"
@@ -22,7 +23,8 @@ import (
 )
 
 const (
-	KineSocket = "unix://kine.sock"
+	KineSocket          = "unix://kine.sock"
+	GracefulStopTimeout = 2 * time.Second
 )
 
 type Config struct {
@@ -44,6 +46,7 @@ type Config struct {
 	LogFormat              string
 	DisableNotifications   bool
 	NotificationBufferSize int
+	WaitGroup              *sync.WaitGroup
 }
 
 type ETCDConfig struct {
@@ -79,7 +82,10 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 		return ETCDConfig{}, errors.Wrap(err, "failed to create driver for "+epType)
 	}
 
+	bctx, bcancel := context.WithCancel(ctx)
+
 	if backend == nil {
+		bcancel()
 		return ETCDConfig{
 			Endpoints:   strings.Split(config.Endpoint, ","),
 			TLSConfig:   config.BackendTLSConfig,
@@ -90,26 +96,40 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 	// Metrics are already registered in metrics/registry.go init()
 	// Skip duplicate registration to avoid panic
 
-	if err := backend.Start(ctx); err != nil {
+	grpcServer, err := grpcServer(config)
+	if err != nil {
+		return ETCDConfig{}, errors.Wrap(err, "creating GRPC server")
+	}
+
+	wg := waitGroup(config)
+
+	go func() {
+		<-ctx.Done()
+		logrus.Infof("Waiting up to %s for graceful shutdown of Kine GRPC server...", GracefulStopTimeout)
+		timer := time.AfterFunc(GracefulStopTimeout, grpcServer.Stop)
+		defer timer.Stop()
+		grpcServer.GracefulStop()
+		bcancel()
+	}()
+
+	if err := backend.Start(bctx); err != nil {
 		return ETCDConfig{}, errors.Wrap(err, "starting kine backend")
 	}
 
 	// set up GRPC server and register services
 	b := server.New(backend, endpointScheme(config), config.NotifyInterval, config.EmulatedETCDVersion)
-	grpcServer, err := grpcServer(config)
-	if err != nil {
-		return ETCDConfig{}, errors.Wrap(err, "creating GRPC server")
-	}
 	b.Register(grpcServer)
 
 	// Create raw listener and wrap in cmux for protocol switching
-	listener, err := createListener(config)
+	listener, err := createListener(bctx, config)
 	if err != nil {
 		return ETCDConfig{}, errors.Wrap(err, "creating listener")
 	}
 
+	wg.Add(1)
 	go func() {
-		if err := grpcServer.Serve(listener); err != nil {
+		defer wg.Done()
+		if err := grpcServer.Serve(listener); err != nil && !errors.Is(err, context.Canceled) {
 			logrus.Errorf("Kine GPRC server exited: %v", err)
 		}
 	}()
@@ -163,7 +183,7 @@ func endpointScheme(config Config) string {
 }
 
 // createListener returns a listener bound to the requested protocol and address.
-func createListener(config Config) (ret net.Listener, rerr error) {
+func createListener(ctx context.Context, config Config) (ret net.Listener, rerr error) {
 	if config.Listener == "" {
 		config.Listener = KineSocket
 	}
@@ -182,7 +202,16 @@ func createListener(config Config) (ret net.Listener, rerr error) {
 		scheme = "tcp"
 	}
 
-	return net.Listen(scheme, address)
+	lc := net.ListenConfig{}
+	return lc.Listen(ctx, scheme, address)
+}
+
+// waitGroup returns either the provided WaitGroup, or creates a new one
+func waitGroup(config Config) *sync.WaitGroup {
+	if config.WaitGroup != nil {
+		return config.WaitGroup
+	}
+	return &sync.WaitGroup{}
 }
 
 // grpcServer returns either a preconfigured GRPC server, or builds a new GRPC

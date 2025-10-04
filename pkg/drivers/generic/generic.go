@@ -29,8 +29,10 @@ const (
 var _ server.Dialect = (*Generic)(nil)
 
 var (
-	columns = "kv.id AS theid, kv.name AS thename, kv.created, kv.deleted, kv.create_revision, kv.prev_revision, kv.lease, kv.value, kv.old_value"
-	revSQL  = `
+	columns    = "kv.id AS theid, kv.name AS thename, kv.created, kv.deleted, kv.create_revision, kv.prev_revision, kv.lease"
+	withVal    = columns + ", kv.value"
+	withOldVal = withVal + ", kv.old_value"
+	revSQL     = `
 		SELECT MAX(rkv.id) AS id
 		FROM kine AS rkv`
 
@@ -38,8 +40,7 @@ var (
 		SELECT MAX(crkv.prev_revision) AS prev_revision
 		FROM kine AS crkv
 		WHERE crkv.name = 'compact_rev_key'`
-
-	listSQL = fmt.Sprintf(`
+	listFmt = `
 		SELECT *
 		FROM (
 			SELECT (%s), (%s), %s
@@ -57,7 +58,10 @@ var (
 				?
 		) AS lkv
 		ORDER BY lkv.thename ASC
-		`, revSQL, compactRevSQL, columns)
+		`
+	listSQL       = fmt.Sprintf(listFmt, revSQL, compactRevSQL, columns)
+	listValSQL    = fmt.Sprintf(listFmt, revSQL, compactRevSQL, withVal)
+	listOldValSQL = fmt.Sprintf(listFmt, revSQL, compactRevSQL, withOldVal)
 )
 
 type ErrRetry func(error) bool
@@ -172,7 +176,7 @@ func openAndTest(driverName, dataSourceName string) (*sql.DB, error) {
 	return db, nil
 }
 
-func Open(ctx context.Context, driverName, dataSourceName string, connPoolConfig ConnectionPoolConfig, paramCharacter string, numbered bool, metricsRegisterer prometheus.Registerer) (*Generic, error) {
+func Open(ctx context.Context, wg *sync.WaitGroup, driverName, dataSourceName string, connPoolConfig ConnectionPoolConfig, paramCharacter string, numbered bool, metricsRegisterer prometheus.Registerer) (*Generic, error) {
 	var (
 		db  *sql.DB
 		err error
@@ -184,13 +188,23 @@ func Open(ctx context.Context, driverName, dataSourceName string, connPoolConfig
 			break
 		}
 
-		logrus.Errorf("failed to ping connection: %v", err)
+		logrus.Errorf("Failed to ping database connection: %v", err)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		logrus.Infof("Closing database connections...")
+		if err := db.Close(); err != nil {
+			logrus.Errorf("Failed to close database: %v", err)
+		}
+	}()
 
 	configureConnectionPooling(connPoolConfig, db, driverName)
 
@@ -201,15 +215,12 @@ func Open(ctx context.Context, driverName, dataSourceName string, connPoolConfig
 	return &Generic{
 		DB: db,
 
-		GetRevisionSQL: q(fmt.Sprintf(`
-			SELECT
-			0, 0, %s
-			FROM kine AS kv
-			WHERE kv.id = ?`, columns), paramCharacter, numbered),
-
-		GetCurrentSQL:        q(fmt.Sprintf(listSQL, "AND mkv.name > ?"), paramCharacter, numbered),
-		ListRevisionStartSQL: q(fmt.Sprintf(listSQL, "AND mkv.id <= ?"), paramCharacter, numbered),
-		GetRevisionAfterSQL:  q(fmt.Sprintf(listSQL, "AND mkv.name > ? AND mkv.id <= ?"), paramCharacter, numbered),
+		GetCurrentSQL:           q(fmt.Sprintf(listSQL, "AND mkv.name > ?"), paramCharacter, numbered),
+		GetCurrentValSQL:        q(fmt.Sprintf(listValSQL, "AND mkv.name > ?"), paramCharacter, numbered),
+		ListRevisionStartSQL:    q(fmt.Sprintf(listSQL, "AND mkv.id <= ?"), paramCharacter, numbered),
+		ListRevisionStartValSQL: q(fmt.Sprintf(listValSQL, "AND mkv.id <= ?"), paramCharacter, numbered),
+		GetRevisionAfterSQL:     q(fmt.Sprintf(listSQL, "AND mkv.name > ? AND mkv.id <= ?"), paramCharacter, numbered),
+		GetRevisionAfterValSQL:  q(fmt.Sprintf(listValSQL, "AND mkv.name > ? AND mkv.id <= ?"), paramCharacter, numbered),
 
 		CountCurrentSQL: q(fmt.Sprintf(`
 			SELECT (%s), COUNT(c.theid)
@@ -223,13 +234,13 @@ func Open(ctx context.Context, driverName, dataSourceName string, connPoolConfig
 				%s
 			) c`, revSQL, fmt.Sprintf(listSQL, "AND mkv.name > ? AND mkv.id <= ?")), paramCharacter, numbered),
 
-		AfterSQL: q(fmt.Sprintf(`
+		AfterOldValSQL: q(fmt.Sprintf(`
 			SELECT (%s), (%s), %s
 			FROM kine AS kv
 			WHERE
 				kv.name LIKE ? AND
 				kv.id > ?
-			ORDER BY kv.id ASC`, revSQL, compactRevSQL, columns), paramCharacter, numbered),
+			ORDER BY kv.id ASC`, revSQL, compactRevSQL, withOldVal), paramCharacter, numbered),
 
 		DeleteSQL: q(`
 			DELETE FROM kine AS kv
@@ -324,34 +335,44 @@ func (d *Generic) PostCompact(ctx context.Context) error {
 	return nil
 }
 
-func (d *Generic) GetRevision(ctx context.Context, revision int64) (*sql.Rows, error) {
-	return d.query(ctx, d.GetRevisionSQL, revision)
-}
-
 func (d *Generic) DeleteRevision(ctx context.Context, revision int64) error {
 	logrus.Tracef("DELETEREVISION %v", revision)
 	_, err := d.execute(ctx, d.DeleteSQL, revision)
 	return err
 }
 
-func (d *Generic) ListCurrent(ctx context.Context, prefix, startKey string, limit int64, includeDeleted bool) (*sql.Rows, error) {
-	sql := d.GetCurrentSQL
+func (d *Generic) ListCurrent(ctx context.Context, prefix, startKey string, limit int64, includeDeleted, keysOnly bool) (*sql.Rows, error) {
+	var sql string
+	if keysOnly {
+		sql = d.GetCurrentSQL
+	} else {
+		sql = d.GetCurrentValSQL
+	}
 	if limit > 0 {
 		sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
 	}
 	return d.query(ctx, sql, prefix, startKey, includeDeleted)
 }
 
-func (d *Generic) List(ctx context.Context, prefix, startKey string, limit, revision int64, includeDeleted bool) (*sql.Rows, error) {
+func (d *Generic) List(ctx context.Context, prefix, startKey string, limit, revision int64, includeDeleted, keysOnly bool) (*sql.Rows, error) {
+	var sql string
 	if startKey == "" {
-		sql := d.ListRevisionStartSQL
+		if keysOnly {
+			sql = d.ListRevisionStartSQL
+		} else {
+			sql = d.ListRevisionStartValSQL
+		}
 		if limit > 0 {
 			sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
 		}
 		return d.query(ctx, sql, prefix, revision, includeDeleted)
 	}
 
-	sql := d.GetRevisionAfterSQL
+	if keysOnly {
+		sql = d.GetRevisionAfterSQL
+	} else {
+		sql = d.GetRevisionAfterValSQL
+	}
 	if limit > 0 {
 		sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
 	}
@@ -391,7 +412,7 @@ func (d *Generic) CurrentRevision(ctx context.Context) (int64, error) {
 }
 
 func (d *Generic) After(ctx context.Context, prefix string, rev, limit int64) (*sql.Rows, error) {
-	sql := d.AfterSQL
+	sql := d.AfterOldValSQL
 	if limit > 0 {
 		sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
 	}
