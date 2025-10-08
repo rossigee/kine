@@ -88,10 +88,9 @@ type Generic struct {
 	ListRevisionStartValSQL string
 	GetRevisionAfterSQL     string
 	GetRevisionAfterValSQL  string
-	CountCurrentSQL         string
-	CountRevisionSQL        string
-	AfterSQL                string
-	AfterOldValSQL          string
+			CountCurrentSQL         string
+		CountRevisionSQL        string
+		AfterOldValSQL          string
 	DeleteSQL               string
 	CompactSQL              string
 	UpdateCompactSQL        string

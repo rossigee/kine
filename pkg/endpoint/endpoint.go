@@ -57,6 +57,7 @@ type ETCDConfig struct {
 
 func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 	wg := waitGroup(config)
+
 	leaderElect, backend, err := drivers.New(ctx, wg, &drivers.Config{
 		MetricsRegisterer:      config.MetricsRegisterer,
 		Endpoint:               config.Endpoint,
