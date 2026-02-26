@@ -108,7 +108,6 @@ type Generic struct {
 	FillRetryDuration       time.Duration
 	NotificationChannel     chan int64
 }
-}
 
 func q(sql, param string, numbered bool) string {
 	if param == "?" && !numbered {

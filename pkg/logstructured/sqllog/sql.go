@@ -27,7 +27,7 @@ type SQLLog struct {
 	broadcaster           broadcaster.Broadcaster
 	ctx                   context.Context
 	notify                chan int64
-	currentRev            atomic.Int64
+	currentRev            int64
 	polledRev             atomic.Int64
 	polled                *sync.Cond
 	compactInterval       time.Duration
@@ -338,7 +338,17 @@ func (s *SQLLog) List(ctx context.Context, prefix, startKey string, limit, revis
 		err  error
 	)
 
-	startKey = s.d.TranslateStartKey(startKey)
+	// It's assumed that when there is a start key that that key exists.
+	if strings.HasSuffix(prefix, "/") {
+		// In the situation of a list start the startKey will not exist so set to ""
+		if prefix == startKey {
+			startKey = ""
+		}
+		prefix += "%"
+	} else {
+		// Also if this isn't a list there is no reason to pass startKey
+		startKey = ""
+	}
 
 	if revision == 0 {
 		rows, err = s.d.ListCurrent(ctx, prefix, startKey, limit, includeDeleted, keysOnly)
@@ -354,7 +364,7 @@ func (s *SQLLog) List(ctx context.Context, prefix, startKey string, limit, revis
 		return 0, nil, err
 	}
 
-	if revision != 0 && len(result) == 0 {
+	if revision > 0 && len(result) == 0 {
 		// a zero length result won't have the compact or current revisions so get them manually
 		rev, err = s.CurrentRevision(ctx)
 		if err != nil {
@@ -385,9 +395,9 @@ func (s *SQLLog) List(ctx context.Context, prefix, startKey string, limit, revis
 // rowsToEvents converts database rows to KV store events.
 // if val is false, rows must not include the current value
 // if prev is false, rows must additionally not include the previous value
-func RowsToEvents(rows *sql.Rows, val, prev bool) (int64, int64, server.Events, error) {
+func RowsToEvents(rows *sql.Rows, val, prev bool) (int64, int64, []*server.Event, error) {
 	var (
-		result  server.Events
+		result  []*server.Event
 		rev     int64
 		compact int64
 	)
@@ -426,8 +436,9 @@ func (s *SQLLog) Watch(ctx context.Context, prefix string) <-chan server.Events 
 	return res
 }
 
-func filter(eventList server.Events, checkPrefix bool, prefix string) (server.Events, bool) {
-	filteredEventList := make(server.Events, 0, len(eventList))
+func filter(events interface{}, checkPrefix bool, prefix string) (server.Events, bool) {
+	eventList := events.([]*server.Event)
+	filteredEventList := make([]*server.Event, 0, len(eventList))
 
 	for _, event := range eventList {
 		if (checkPrefix && strings.HasPrefix(event.KV.Key, prefix)) || event.KV.Key == prefix {
@@ -463,6 +474,58 @@ func (s *SQLLog) startWatch() (chan server.Events, error) {
 	go s.poll(c, pollStart)
 	return c, nil
 }
+
+func (s *SQLLog) poll(result chan server.Events, pollStart int64) {
+	s.currentRev = pollStart
+
+	var (
+		skip        int64
+		skipTime    time.Time
+		waitForMore = true
+	)
+
+	wait := time.NewTicker(time.Second)
+	defer wait.Stop()
+	defer close(result)
+
+	for {
+		if waitForMore {
+			// Get notification channel from dialect if available
+			var dialectNotify <-chan int64
+			if genericDialect, ok := s.d.(*generic.Generic); ok && genericDialect.NotificationChannel != nil {
+				dialectNotify = genericDialect.NotificationChannel
+			}
+
+			if dialectNotify != nil {
+				select {
+				case <-s.ctx.Done():
+					return
+				case check := <-s.notify:
+					if check <= s.currentRev {
+						continue
+					}
+				case check := <-dialectNotify:
+					if check <= s.currentRev {
+						continue
+					}
+					logrus.Tracef("Event-driven notification received for revision: %d", check)
+				case <-wait.C:
+				}
+			} else {
+				select {
+				case <-s.ctx.Done():
+					return
+				case check := <-s.notify:
+					if check <= s.currentRev {
+						continue
+					}
+				case <-wait.C:
+				}
+			}
+		}
+		waitForMore = true
+
+		rows, err := s.d.After(s.ctx, "%", s.currentRev, s.pollBatchSize)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				logrus.Errorf("fail to list latest changes: %v", err)
@@ -486,7 +549,7 @@ func (s *SQLLog) startWatch() (chan server.Events, error) {
 
 		rev := s.currentRev
 		var (
-			sequential server.Events
+			sequential []*server.Event
 			saveLast   bool
 		)
 
@@ -563,8 +626,6 @@ func (s *SQLLog) Count(ctx context.Context, prefix, startKey string, revision in
 		prefix += "%"
 	}
 
-	startKey = s.d.TranslateStartKey(startKey)
-
 	if revision == 0 {
 		return s.d.CountCurrent(ctx, prefix, startKey)
 	}
@@ -631,10 +692,6 @@ func scan(rows *sql.Rows, rev *int64, compact *int64, event *server.Event, val, 
 	if event.Create {
 		event.KV.CreateRevision = event.KV.ModRevision
 		event.PrevKV = nil
-	} else {
-		event.PrevKV.CreateRevision = event.KV.CreateRevision
-		event.PrevKV.Lease = event.KV.Lease
-		event.PrevKV.Key = event.KV.Key
 	}
 
 	*compact = c.Int64

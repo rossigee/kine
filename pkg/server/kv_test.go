@@ -23,6 +23,8 @@ func newMockBackend() *mockBackend {
 
 func (m *mockBackend) Start(ctx context.Context) error { return nil }
 
+func (m *mockBackend) WaitForSyncTo(revision int64) {}
+
 func (m *mockBackend) Get(ctx context.Context, key, rangeEnd string, limit, revision int64, keysOnly bool) (int64, *KeyValue, error) {
 	if kv, exists := m.data[key]; exists {
 		return m.rev, kv, nil
